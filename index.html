@@ -2442,6 +2442,29 @@
             </div>
           </div>
 
+          {/* ===== CAREER ASSETS CTA — encourage uploads for AI Coach personalization ===== */}
+          {(data.careerAssets?.documents || []).length < 2 && (
+            <div className="glass-card p-5 flex items-center gap-4" style={{ borderColor: '#5c7cfa30', borderWidth: '1px' }}>
+              <span className="text-3xl flex-shrink-0">📁</span>
+              <div className="flex-1">
+                <p className="text-sm font-bold text-white mb-1">
+                  {(data.careerAssets?.documents || []).length === 0 ? 'Supercharge Your AI Coach' : 'Almost There — Add One More Asset'}
+                </p>
+                <p className="text-xs text-gray-400">
+                  {(data.careerAssets?.documents || []).length === 0
+                    ? 'Upload your LinkedIn PDF, resume, and performance reviews. The AI Coach uses these documents to give you advice that\'s specific to YOUR career — not generic tips.'
+                    : `You've uploaded ${(data.careerAssets?.documents || []).length} document. Add a ${!(data.careerAssets?.documents || []).some(a => a.category === 'resume') ? 'resume' : 'performance review'} to unlock deeper AI coaching insights.`
+                  }
+                </p>
+              </div>
+              <button onClick={() => setActiveView('career-assets')}
+                className="px-4 py-2 rounded-xl font-bold text-sm text-white flex-shrink-0 transition-all hover:scale-105"
+                style={{ background: 'linear-gradient(135deg, #5c7cfa, #4c6ef5)' }}>
+                Upload Now →
+              </button>
+            </div>
+          )}
+
           {/* ===== TRACK-SPECIFIC RECOMMENDATIONS — personalized action plan ===== */}
           {trackRecs.length > 0 && (
             <div className="glass-card p-6">
@@ -7732,20 +7755,53 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
         COACHING_FLOWS.filter(f => f.tracks.includes(track)),
       [track]);
 
+      // Build career context string from uploaded Career Assets
+      const buildCareerContext = () => {
+        const assets = data.careerAssets?.documents || [];
+        if (assets.length === 0) return '';
+        const summaries = assets.slice(0, 5).map(a => {
+          const cat = ASSET_CATEGORIES.find(c => c.id === a.category);
+          const preview = (a.content || '').substring(0, 300);
+          return `[${cat?.label || a.category}] ${a.name}: ${preview}`;
+        });
+        return `\n\n**Career Assets on file (${assets.length} documents):**\n` +
+          summaries.map(s => `- ${s}`).join('\n');
+      };
+
       // Start a coaching session
       const startFlow = (flow) => {
         setActiveFlow(flow);
-        setMessages([{
-          role: 'assistant',
-          content: `Welcome to the **${flow.title}** coaching session. I've reviewed your Career Beast Mode data:\n\n` +
+        const careerCtx = buildCareerContext();
+        const assetCount = (data.careerAssets?.documents || []).length;
+        const linkedinUploaded = (data.careerAssets?.documents || []).some(a => a.category === 'linkedin-pdf');
+        const resumeUploaded = (data.careerAssets?.documents || []).some(a => a.category === 'resume');
+
+        let openingMsg = `Welcome to the **${flow.title}** coaching session. I've reviewed your Career Beast Mode data:\n\n` +
             `- **Beast Score:** ${beastData.beastScore}/100 (${beastData.level.label})\n` +
             `- **Track:** ${track === 'operator' ? 'AI Champion' : 'Builder / Founder'}\n` +
             `- **Weakest dimension:** ${
               Object.entries(beastData.dimensions)
                 .sort(([,a],[,b]) => a - b)[0]?.[0]?.replace(/_/g, ' ') || 'not yet assessed'
-            }\n\n` +
-            `How can I help you today? You can ask me anything, or try one of the suggested prompts below.`
-        }]);
+            }\n`;
+
+        // Add Career Assets context
+        if (assetCount > 0) {
+          openingMsg += `- **Career Assets:** ${assetCount} document${assetCount > 1 ? 's' : ''} uploaded`;
+          if (linkedinUploaded) openingMsg += ' (including LinkedIn profile)';
+          if (resumeUploaded) openingMsg += `${linkedinUploaded ? ' and' : ' (including'} resume${linkedinUploaded ? '' : ')'}`;
+          openingMsg += `\n`;
+          // Reference specific asset insights
+          const linkedinDoc = (data.careerAssets?.documents || []).find(a => a.category === 'linkedin-pdf');
+          if (linkedinDoc && linkedinDoc.content && linkedinDoc.content.length > 20) {
+            openingMsg += `\nI've analyzed your LinkedIn profile and career documents — my advice will be tailored to your specific background and experience.\n`;
+          }
+        } else {
+          openingMsg += `\n💡 **Tip:** Upload your LinkedIn PDF and resume in **Career Assets** for much more personalized coaching.\n`;
+        }
+
+        openingMsg += `\nHow can I help you today? You can ask me anything, or try one of the suggested prompts below.`;
+
+        setMessages([{ role: 'assistant', content: openingMsg }]);
       };
 
       // Send a message (simulated response for now — will connect to Claude API in Step 2)
@@ -7989,20 +8045,41 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
 
     // Simulated AI response generator (placeholder until Claude API is connected)
     // Generates contextual, non-generic responses based on flow type and user data
+    // Now also incorporates Career Assets (LinkedIn profile, resume, etc.) for personalization
     const generateSimulatedResponse = (flow, userInput, beastData, track, data) => {
       const weakestDim = Object.entries(beastData.dimensions)
         .sort(([,a],[,b]) => a - b)[0];
       const weakestName = weakestDim ? weakestDim[0].replace(/_/g, ' ') : 'your career readiness';
       const weakestScore = weakestDim ? weakestDim[1] : 0;
 
+      // Extract Career Assets context for personalization
+      const assets = data.careerAssets?.documents || [];
+      const linkedinDoc = assets.find(a => a.category === 'linkedin-pdf');
+      const resumeDoc = assets.find(a => a.category === 'resume');
+      const reviewDocs = assets.filter(a => a.category === 'performance-review');
+      const hasAssets = assets.length > 0;
+
+      // Extract key details from LinkedIn/resume text (simple keyword extraction)
+      let assetInsight = '';
+      const assetText = (linkedinDoc?.content || '') + ' ' + (resumeDoc?.content || '');
+      if (assetText.length > 30) {
+        // Try to extract company, skills, years from the pasted text
+        const hasAI = /\b(AI|artificial intelligence|machine learning|ML|LLM|GPT|NLP)\b/i.test(assetText);
+        const hasLeadership = /\b(VP|director|head of|chief|CHRO|CTO|CEO|led|managed|leadership)\b/i.test(assetText);
+        const hasTeam = assetText.match(/(\d+)\+?\s*(people|engineers|team|reports|employees)/i);
+        if (hasAI) assetInsight += 'I see AI/ML mentioned in your profile — that\'s a strong foundation. ';
+        if (hasLeadership) assetInsight += 'Your leadership experience is clear from your background. ';
+        if (hasTeam) assetInsight += `Managing ${hasTeam[1]}+ people gives you significant organizational leverage. `;
+      }
+
       // Context-aware responses based on flow type
       const responses = {
         'career-strategy': [
-          `Based on your data, here's my honest assessment:\n\n**Your Beast Score is ${beastData.beastScore}/100** — that puts you in the "${beastData.level.label}" category. Let's be direct about what that means.\n\n**Your biggest gap is ${weakestName} at ${weakestScore}/100.** This is where you should focus your energy for the next 2 weeks.\n\n**Concrete next steps:**\n1. Complete 3 more tools in Phase 1 to unlock Phase 2 — you need the foundation before strategy.\n2. Your ${weakestName} score suggests you ${track === 'operator' ? 'need more hands-on AI experience before you can credibly champion it internally' : 'need to diversify your income sources before going fully independent'}.\n3. Block 30 minutes this week for the ${weakestName === 'ai readiness' ? 'AI Automation Audit' : weakestName === 'personal brand' ? 'LinkedIn Audit' : weakestName === 'network strength' ? 'Node Map' : 'Skills Edge Pyramid'} tool.\n\nWhat would you like to dig deeper on?`,
-          `Let me break down your career position based on what I see:\n\n**Strengths:** You've started the journey — that puts you ahead of 90% of executives who are still ignoring AI.\n\n**Weaknesses:** Your ${weakestName} score of ${weakestScore}/100 is a red flag. ${track === 'operator' ? 'In a corporate setting, this makes you vulnerable to being passed over for AI-savvy leaders who are being hired from outside.' : 'As an independent, this directly impacts your ability to attract and retain clients.'}\n\n**The honest truth:** With a Beast Score of ${beastData.beastScore}, you're not ready for ${track === 'operator' ? 'an AI leadership role' : 'going independent'} yet. But you can get there in 60-90 days with focused effort.\n\n**Priority action:** Complete Phase 1 tools (you're at ${Math.round((beastData.beastScore / 100) * 8)}/8). Each tool gives you data that makes the next coaching session more valuable.\n\nWhat specific area worries you most?`,
+          `Based on your data${hasAssets ? ' and uploaded career documents' : ''}, here's my honest assessment:\n\n${assetInsight ? `**From your profile:** ${assetInsight}\n\n` : ''}**Your Beast Score is ${beastData.beastScore}/100** — that puts you in the "${beastData.level.label}" category. Let's be direct about what that means.\n\n**Your biggest gap is ${weakestName} at ${weakestScore}/100.** This is where you should focus your energy for the next 2 weeks.\n\n**Concrete next steps:**\n1. Complete 3 more tools in Phase 1 to unlock Phase 2 — you need the foundation before strategy.\n2. Your ${weakestName} score suggests you ${track === 'operator' ? 'need more hands-on AI experience before you can credibly champion it internally' : 'need to diversify your income sources before going fully independent'}.\n3. Block 30 minutes this week for the ${weakestName === 'ai readiness' ? 'AI Automation Audit' : weakestName === 'personal brand' ? 'LinkedIn Audit' : weakestName === 'network strength' ? 'Node Map' : 'Skills Edge Pyramid'} tool.${!hasAssets ? '\n4. **Upload your LinkedIn PDF and resume** in Career Assets — it will make my advice 10x more specific to your situation.' : ''}\n\nWhat would you like to dig deeper on?`,
+          `Let me break down your career position based on ${hasAssets ? 'your uploaded documents and assessment data' : 'what I see'}:\n\n${assetInsight ? `**Profile insights:** ${assetInsight}\n\n` : ''}**Strengths:** You've started the journey — that puts you ahead of 90% of executives who are still ignoring AI.\n\n**Weaknesses:** Your ${weakestName} score of ${weakestScore}/100 is a red flag. ${track === 'operator' ? 'In a corporate setting, this makes you vulnerable to being passed over for AI-savvy leaders who are being hired from outside.' : 'As an independent, this directly impacts your ability to attract and retain clients.'}\n\n**The honest truth:** With a Beast Score of ${beastData.beastScore}, you're not ready for ${track === 'operator' ? 'an AI leadership role' : 'going independent'} yet. But you can get there in 60-90 days with focused effort.\n\n**Priority action:** Complete Phase 1 tools (you're at ${Math.round((beastData.beastScore / 100) * 8)}/8). Each tool gives you data that makes the next coaching session more valuable.\n\nWhat specific area worries you most?`,
         ],
         'personal-brand': [
-          `Let's build your brand from the ground up. Based on your ${track === 'operator' ? 'AI Champion' : 'Founder'} track, here's what I'd recommend:\n\n**LinkedIn Headline Formula:**\n"${data.user.role || 'CHRO'} | ${track === 'operator' ? 'Leading AI Transformation in' : 'Helping organizations with'} ${data.user.industry || '[Your Industry]'} | ${track === 'operator' ? 'Building AI-Powered HR Teams' : 'Fractional CHRO & AI Strategy'}" \n\n**Your 3 Content Pillars should be:**\n1. AI + ${data.user.industry || 'Your Industry'} (your domain expertise)\n2. Career transformation stories (your personal journey)\n3. Practical AI tutorials (show, don't tell)\n\n**Publishing cadence:** 2 LinkedIn posts/week + 1 longer article/month. That's 12 minutes of writing per day.\n\nWant me to help you draft your first post?`,
+          `Let's build your brand${linkedinDoc ? ' — I\'ve reviewed your LinkedIn profile data' : ' from the ground up'}. Based on your ${track === 'operator' ? 'AI Champion' : 'Founder'} track, here's what I'd recommend:\n\n${assetInsight ? `**What I see in your profile:** ${assetInsight}\n\n` : ''}**LinkedIn Headline Formula:**\n"${data.user.role || 'CHRO'} | ${track === 'operator' ? 'Leading AI Transformation in' : 'Helping organizations with'} ${data.user.industry || '[Your Industry]'} | ${track === 'operator' ? 'Building AI-Powered HR Teams' : 'Fractional CHRO & AI Strategy'}" \n\n**Your 3 Content Pillars should be:**\n1. AI + ${data.user.industry || 'Your Industry'} (your domain expertise)\n2. Career transformation stories (your personal journey)\n3. Practical AI tutorials (show, don't tell)\n\n**Publishing cadence:** 2 LinkedIn posts/week + 1 longer article/month. That's 12 minutes of writing per day.\n\n${!linkedinDoc ? '**Action item:** Upload your LinkedIn PDF in Career Assets — I can give you line-by-line feedback on your current profile.\n\n' : ''}Want me to help you draft your first post?`,
         ],
         'linkedin-optimizer': [
           `Great — paste your LinkedIn headline, About section, or any part of your profile, and I'll give you specific, line-by-line feedback.\n\nWhile I wait, here are the **most common mistakes** I see from ${track === 'operator' ? 'corporate executives' : 'independent consultants'}:\n\n1. **Headline is just a title** — "CHRO at Company X" tells me nothing. Your headline should be a value proposition.\n2. **About section reads like a resume** — It should read like a compelling story with a clear call-to-action.\n3. **No mention of AI** — In 2026, not mentioning AI on an executive profile is like not having email in 2010.\n4. **Too formal** — LinkedIn rewards authentic, human writing. Not corporate-speak.\n\nGo ahead and paste your profile text.`,
