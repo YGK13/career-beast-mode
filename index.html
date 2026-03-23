@@ -195,6 +195,8 @@
       { id: 'four-pillar', label: '4-Pillar Life Check', icon: '⬢', section: 'holistic' },
       { id: 'career-assets', label: 'Career Assets', icon: '⬟', section: 'holistic' },
       // RESOURCES
+      { id: 'career-assets', label: 'Career Assets', icon: '📁', section: 'resources' },
+      { id: 'contact-import', label: 'Contact Import', icon: '📥', section: 'resources' },
       { id: 'mini-crm', label: 'Mini-CRM', icon: '📇', section: 'resources' },
       { id: 'ai-coach', label: 'AI Coach', icon: '🧠', section: 'resources' },
       { id: 'learning-hub', label: 'Learning Hub', icon: '📚', section: 'resources' },
@@ -509,6 +511,13 @@
         sessions: [],         // [{ id, type, messages: [{role, content}], startedAt, summary, actionItems }]
         sessionsUsed: 0,      // count this month (for tier-gating later)
         monthReset: null,     // ISO date string for monthly reset
+      },
+      // Career Assets — document vault for AI Coach personalization
+      careerAssets: {
+        documents: [],   // [{ id, name, type, category, content, uploadedAt, size }]
+        // categories: resume, linkedin-pdf, performance-review, testimonial, bio, media, certification, other
+        linkedinProfile: null, // Parsed LinkedIn PDF text
+        importHistory: [],    // [{ id, source, count, importedAt }]
       },
       // Mini-CRM — contacts and relationship management (Premium feature)
       crm: {
@@ -1656,7 +1665,7 @@
 
       // Auto-expand the phase that contains the active tool
       useEffect(() => {
-        if (activeView === 'dashboard' || activeView === 'learning-hub' || activeView === 'ai-trainer' || activeView === 'ai-coach' || activeView === 'mini-crm' || activeView === 'progress') return;
+        if (activeView === 'dashboard' || activeView === 'learning-hub' || activeView === 'ai-trainer' || activeView === 'ai-coach' || activeView === 'mini-crm' || activeView === 'career-assets' || activeView === 'contact-import' || activeView === 'progress') return;
         for (const phase of JOURNEY_PHASES) {
           const tools = getPhaseTools(phase.id, track);
           if (tools.includes(activeView)) {
@@ -1810,6 +1819,16 @@
             {/* Extra nav sections — Learning Hub, AI Trainer, Progress */}
             <div className="mt-4 border-t border-white/5 pt-3">
               <p className="px-5 text-[10px] text-gray-600 uppercase tracking-widest mb-2">RESOURCES</p>
+              <button onClick={() => setActiveView('career-assets')}
+                className={`nav-item w-full text-left px-5 py-2.5 flex items-center gap-3 text-sm ${activeView === 'career-assets' ? 'active text-white' : 'text-gray-400'}`}>
+                <span className="w-5 text-center opacity-60">📁</span>
+                <span>Career Assets</span>
+              </button>
+              <button onClick={() => setActiveView('contact-import')}
+                className={`nav-item w-full text-left px-5 py-2.5 flex items-center gap-3 text-sm ${activeView === 'contact-import' ? 'active text-white' : 'text-gray-400'}`}>
+                <span className="w-5 text-center opacity-60">📥</span>
+                <span>Contact Import</span>
+              </button>
               <button onClick={() => setActiveView('mini-crm')}
                 className={`nav-item w-full text-left px-5 py-2.5 flex items-center gap-3 text-sm ${activeView === 'mini-crm' ? 'active text-white' : 'text-gray-400'}`}>
                 <span className="w-5 text-center opacity-60">📇</span>
@@ -8007,6 +8026,564 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
     };
 
     // ============================================================
+    // CAREER ASSETS — Document Vault + LinkedIn/Contact Import
+    // Central hub for uploading resumes, LinkedIn PDFs, performance
+    // reviews, testimonials, bios, certifications, and other career
+    // documents. These assets feed into the AI Coach for highly
+    // personalized advice. Also handles CSV contact import from
+    // LinkedIn and Gmail.
+    // ============================================================
+
+    const ASSET_CATEGORIES = [
+      { id: 'resume', label: 'Resume / CV', icon: '📄', color: '#5c7cfa', desc: 'Your current and past resumes' },
+      { id: 'linkedin-pdf', label: 'LinkedIn Profile PDF', icon: '💼', color: '#0077b5', desc: 'Export from LinkedIn → More → Save to PDF' },
+      { id: 'performance-review', label: 'Performance Review', icon: '📊', color: '#2d6a4f', desc: 'Annual reviews, 360 feedback, manager evaluations' },
+      { id: 'testimonial', label: 'Testimonial / Review', icon: '⭐', color: '#f4a261', desc: 'LinkedIn recommendations, client reviews, endorsements' },
+      { id: 'bio', label: 'Bio / About Me', icon: '✏️', color: '#7c3aed', desc: 'Professional bios, speaker bios, website about pages' },
+      { id: 'media', label: 'PR / Media Feature', icon: '📰', color: '#e63946', desc: 'Articles, podcasts, press mentions, interviews' },
+      { id: 'certification', label: 'Certification', icon: '🎓', color: '#2a9d8f', desc: 'Certificates, licenses, course completions' },
+      { id: 'other', label: 'Other', icon: '📎', color: '#666', desc: 'Any other career-relevant document' },
+    ];
+
+    const CareerAssetsView = () => {
+      const { data, updateData } = useApp();
+      const assets = data.careerAssets?.documents || [];
+      const [showUpload, setShowUpload] = useState(false);
+      const [selectedCategory, setSelectedCategory] = useState('resume');
+      const [dragOver, setDragOver] = useState(false);
+      const fileInputRef = useRef(null);
+
+      // Count by category
+      const categoryCounts = {};
+      ASSET_CATEGORIES.forEach(c => { categoryCounts[c.id] = assets.filter(a => a.category === c.id).length; });
+      const totalAssets = assets.length;
+      const hasLinkedIn = assets.some(a => a.category === 'linkedin-pdf');
+
+      // Read file as text (for PDF/text files — browser-side only)
+      const handleFileUpload = (files, category) => {
+        Array.from(files).forEach(file => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const content = e.target.result;
+            const newAsset = {
+              id: Date.now() + Math.random(),
+              name: file.name,
+              type: file.type || 'text/plain',
+              category: category,
+              content: typeof content === 'string' ? content.substring(0, 50000) : '[Binary file — preview not available]',
+              uploadedAt: new Date().toISOString(),
+              size: file.size,
+            };
+            const current = data.careerAssets?.documents || [];
+            updateData('careerAssets.documents', [...current, newAsset]);
+
+            // If LinkedIn PDF, also store parsed text
+            if (category === 'linkedin-pdf' && typeof content === 'string') {
+              updateData('careerAssets.linkedinProfile', content.substring(0, 50000));
+            }
+          };
+          // Read as text for txt/pdf text content; for other types, store metadata only
+          if (file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+            reader.readAsText(file);
+          } else {
+            // For PDFs and other binary files, store metadata + prompt user to paste text
+            const newAsset = {
+              id: Date.now() + Math.random(),
+              name: file.name,
+              type: file.type,
+              category: category,
+              content: `[File: ${file.name}] — Paste the text content below for AI Coach analysis, or use the text input to add key highlights.`,
+              uploadedAt: new Date().toISOString(),
+              size: file.size,
+            };
+            const current = data.careerAssets?.documents || [];
+            updateData('careerAssets.documents', [...current, newAsset]);
+          }
+        });
+        setShowUpload(false);
+      };
+
+      // Handle text paste (for copying LinkedIn profile text, review excerpts, etc.)
+      const [pasteText, setPasteText] = useState('');
+      const [pasteName, setPasteName] = useState('');
+
+      const handlePasteSubmit = () => {
+        if (!pasteText.trim()) return;
+        const newAsset = {
+          id: Date.now() + Math.random(),
+          name: pasteName || `${ASSET_CATEGORIES.find(c => c.id === selectedCategory)?.label} — ${new Date().toLocaleDateString()}`,
+          type: 'text/plain',
+          category: selectedCategory,
+          content: pasteText.substring(0, 50000),
+          uploadedAt: new Date().toISOString(),
+          size: pasteText.length,
+        };
+        updateData('careerAssets.documents', [...assets, newAsset]);
+        if (selectedCategory === 'linkedin-pdf') {
+          updateData('careerAssets.linkedinProfile', pasteText.substring(0, 50000));
+        }
+        setPasteText('');
+        setPasteName('');
+        setShowUpload(false);
+      };
+
+      const deleteAsset = (id) => {
+        updateData('careerAssets.documents', assets.filter(a => a.id !== id));
+      };
+
+      const formatSize = (bytes) => {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      };
+
+      return (
+        <div className="fade-in space-y-6">
+          {/* Header with encouragement */}
+          <div className="glass-card p-6 glow">
+            <div className="flex items-start justify-between">
+              <div>
+                <h1 className="text-2xl font-bold text-white">Career Assets Vault</h1>
+                <p className="text-gray-400 text-sm mt-1">Upload your career documents. The more context you provide, the smarter your AI Coach becomes.</p>
+              </div>
+              <button onClick={() => setShowUpload(!showUpload)}
+                className="px-4 py-2 rounded-xl font-bold text-sm text-white transition-all hover:scale-105 flex-shrink-0"
+                style={{ background: 'linear-gradient(135deg, #5c7cfa, #4c6ef5)' }}>
+                + Upload Asset
+              </button>
+            </div>
+            {/* Encouragement banner */}
+            {totalAssets < 3 && (
+              <div className="mt-4 p-3 rounded-xl bg-brand-500/10 border border-brand-500/20">
+                <p className="text-xs text-brand-300">
+                  <strong>💡 Pro tip:</strong> Upload at least your <strong>resume</strong>, <strong>LinkedIn PDF</strong>, and one <strong>performance review</strong> to unlock highly personalized AI coaching.
+                  {totalAssets === 0 && ' Start with your LinkedIn profile — it takes 30 seconds.'}
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Category grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {ASSET_CATEGORIES.map(cat => (
+              <button key={cat.id} onClick={() => { setSelectedCategory(cat.id); setShowUpload(true); }}
+                className="glass rounded-xl p-3 text-center hover:bg-white/5 transition-all group">
+                <span className="text-lg block mb-1">{cat.icon}</span>
+                <p className="text-xs font-bold text-white group-hover:text-brand-300 transition-colors">{cat.label}</p>
+                <p className="text-[9px] text-gray-500 mt-0.5">{categoryCounts[cat.id] || 0} uploaded</p>
+              </button>
+            ))}
+          </div>
+
+          {/* LinkedIn quick-start guide */}
+          {!hasLinkedIn && (
+            <div className="glass-card p-5" style={{ borderColor: '#0077b520', borderWidth: '1px' }}>
+              <div className="flex items-start gap-3">
+                <span className="text-2xl">💼</span>
+                <div>
+                  <h3 className="text-sm font-bold text-white mb-1">Get Your LinkedIn Profile PDF (30 seconds)</h3>
+                  <ol className="text-xs text-gray-400 space-y-1 list-decimal list-inside">
+                    <li>Go to <strong className="text-white">linkedin.com/in/yourname</strong></li>
+                    <li>Click <strong className="text-white">More ▾</strong> button (below your profile photo)</li>
+                    <li>Select <strong className="text-white">"Save to PDF"</strong></li>
+                    <li>Upload the downloaded PDF here, or <strong className="text-brand-300">copy-paste the text</strong></li>
+                  </ol>
+                  <button onClick={() => { setSelectedCategory('linkedin-pdf'); setShowUpload(true); }}
+                    className="mt-3 px-3 py-1.5 rounded-lg text-xs font-bold text-white bg-[#0077b5] hover:bg-[#005885] transition-all">
+                    Upload LinkedIn PDF →
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Upload form */}
+          {showUpload && (
+            <div className="glass-card p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-bold text-white">
+                  Upload {ASSET_CATEGORIES.find(c => c.id === selectedCategory)?.label}
+                </h3>
+                <button onClick={() => setShowUpload(false)} className="text-gray-500 hover:text-white text-sm">✕</button>
+              </div>
+
+              {/* Category selector */}
+              <div className="flex flex-wrap gap-2 mb-4">
+                {ASSET_CATEGORIES.map(cat => (
+                  <button key={cat.id} onClick={() => setSelectedCategory(cat.id)}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-medium transition-all ${
+                      selectedCategory === cat.id ? 'text-white' : 'text-gray-500 hover:text-gray-300'
+                    }`}
+                    style={selectedCategory === cat.id ? { background: `${cat.color}30`, color: cat.color, borderColor: `${cat.color}50`, borderWidth: '1px' } : {}}>
+                    {cat.icon} {cat.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* File drop zone */}
+              <div
+                className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all mb-4 ${
+                  dragOver ? 'border-brand-400 bg-brand-500/10' : 'border-white/10 hover:border-white/20'
+                }`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFileUpload(e.dataTransfer.files, selectedCategory); }}
+                onClick={() => fileInputRef.current?.click()}>
+                <input ref={fileInputRef} type="file" multiple className="hidden"
+                  accept=".pdf,.txt,.doc,.docx,.md,.rtf,.csv"
+                  onChange={(e) => handleFileUpload(e.target.files, selectedCategory)} />
+                <span className="text-2xl block mb-2">📂</span>
+                <p className="text-sm text-gray-400">Drop files here or <strong className="text-brand-400">click to browse</strong></p>
+                <p className="text-[10px] text-gray-600 mt-1">Supports PDF, TXT, DOC, DOCX, MD, RTF, CSV</p>
+              </div>
+
+              {/* OR paste text */}
+              <div className="relative mb-4">
+                <div className="absolute inset-x-0 top-1/2 border-t border-white/10"></div>
+                <p className="relative text-center"><span className="bg-[#0f1117] px-3 text-[10px] text-gray-600 uppercase">Or paste text directly</span></p>
+              </div>
+
+              <input type="text" value={pasteName} onChange={e => setPasteName(e.target.value)}
+                placeholder="Document name (optional)"
+                className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-600 outline-none mb-3 text-sm" />
+              <textarea value={pasteText} onChange={e => setPasteText(e.target.value)}
+                placeholder={selectedCategory === 'linkedin-pdf' ? 'Paste your LinkedIn profile text here...' :
+                  selectedCategory === 'resume' ? 'Paste your resume text here...' :
+                  selectedCategory === 'performance-review' ? 'Paste key excerpts from your performance review...' :
+                  selectedCategory === 'testimonial' ? 'Paste the testimonial or recommendation text...' :
+                  'Paste the document content here...'}
+                rows={6} className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-600 outline-none resize-none text-sm mb-3" />
+              <Button onClick={handlePasteSubmit} disabled={!pasteText.trim()}>Save Content</Button>
+            </div>
+          )}
+
+          {/* Asset list */}
+          {assets.length > 0 ? (
+            <div className="space-y-2">
+              <h3 className="text-sm font-bold text-white">{assets.length} Career Assets</h3>
+              {assets.map(asset => {
+                const cat = ASSET_CATEGORIES.find(c => c.id === asset.category) || ASSET_CATEGORIES[7];
+                const preview = (asset.content || '').substring(0, 120);
+                return (
+                  <div key={asset.id} className="glass-card p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-lg flex items-center justify-center text-lg flex-shrink-0"
+                        style={{ background: `${cat.color}15` }}>
+                        {cat.icon}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <p className="text-sm font-bold text-white truncate">{asset.name}</p>
+                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold uppercase flex-shrink-0"
+                            style={{ background: `${cat.color}20`, color: cat.color }}>
+                            {cat.label}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-gray-500">
+                          {new Date(asset.uploadedAt).toLocaleDateString()} • {formatSize(asset.size || asset.content?.length || 0)}
+                          {asset.category === 'linkedin-pdf' && <span className="text-green-400 ml-2">✓ Linked to AI Coach</span>}
+                        </p>
+                        {preview && !preview.startsWith('[File:') && (
+                          <p className="text-[10px] text-gray-600 mt-1 line-clamp-2">{preview}...</p>
+                        )}
+                      </div>
+                      <button onClick={() => deleteAsset(asset.id)}
+                        className="text-gray-600 hover:text-red-400 text-xs flex-shrink-0 mt-1">✕</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {/* What to upload guide */}
+          <div className="glass-card p-5">
+            <h3 className="text-sm font-bold text-white mb-3">📋 What Should I Upload?</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {[
+                { label: 'LinkedIn Profile PDF', priority: 'Essential', desc: 'Your public professional identity — skills, experience, recommendations' },
+                { label: 'Current Resume', priority: 'Essential', desc: 'Latest version with achievements and quantified results' },
+                { label: 'Performance Reviews', priority: 'High Value', desc: 'Manager feedback reveals blind spots and hidden strengths' },
+                { label: 'Testimonials', priority: 'High Value', desc: 'Client reviews, LinkedIn recommendations, endorsements' },
+                { label: 'Professional Bio', priority: 'Helpful', desc: 'Speaker bio, website about page, conference bios' },
+                { label: 'Media Mentions', priority: 'Helpful', desc: 'Articles, podcasts, press features — proof of thought leadership' },
+                { label: 'Certifications', priority: 'Nice to Have', desc: 'AI certs, industry licenses, course completions' },
+                { label: 'Past Resumes', priority: 'Nice to Have', desc: 'Shows your career arc and growth trajectory' },
+              ].map(item => (
+                <div key={item.label} className="flex items-start gap-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase flex-shrink-0 mt-0.5 ${
+                    item.priority === 'Essential' ? 'bg-red-500/20 text-red-400' :
+                    item.priority === 'High Value' ? 'bg-yellow-500/20 text-yellow-400' :
+                    item.priority === 'Helpful' ? 'bg-brand-500/20 text-brand-400' :
+                    'bg-gray-500/20 text-gray-400'
+                  }`}>{item.priority}</span>
+                  <div>
+                    <p className="text-xs font-medium text-white">{item.label}</p>
+                    <p className="text-[10px] text-gray-500">{item.desc}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ============================================================
+    // CONTACT IMPORT — LinkedIn & Gmail CSV Import
+    // Imports contacts from CSV exports (LinkedIn, Gmail, Outlook,
+    // Salesforce, HubSpot) into the Mini-CRM. Includes step-by-step
+    // instructions for each platform.
+    // ============================================================
+
+    const IMPORT_SOURCES = [
+      { id: 'linkedin', label: 'LinkedIn', icon: '💼', color: '#0077b5',
+        steps: [
+          'Go to linkedin.com/mypreferences/d/download-my-data',
+          'Select "Connections" and click "Request archive"',
+          'Wait for email from LinkedIn (usually 10 min)',
+          'Download the ZIP → extract → find "Connections.csv"',
+          'Upload that CSV file here',
+        ],
+        fields: { firstName: 'First Name', lastName: 'Last Name', email: 'Email Address', company: 'Company', position: 'Position', connectedOn: 'Connected On' }
+      },
+      { id: 'gmail', label: 'Gmail / Google Contacts', icon: '📧', color: '#ea4335',
+        steps: [
+          'Go to contacts.google.com',
+          'Click "Export" in the left sidebar',
+          'Select "Google CSV" format',
+          'Click "Export" to download',
+          'Upload the contacts.csv file here',
+        ],
+        fields: { firstName: 'First Name', lastName: 'Last Name', email: 'E-mail 1 - Value', company: 'Organization 1 - Name', position: 'Organization 1 - Title' }
+      },
+      { id: 'outlook', label: 'Outlook / Microsoft', icon: '📬', color: '#0078d4',
+        steps: [
+          'In Outlook, go to People (bottom-left icon)',
+          'Click "Manage" → "Export contacts"',
+          'Choose "All contacts" → Export',
+          'Upload the downloaded CSV here',
+        ],
+        fields: { firstName: 'First Name', lastName: 'Last Name', email: 'E-mail Address', company: 'Company', position: 'Job Title' }
+      },
+      { id: 'salesforce', label: 'Salesforce', icon: '☁️', color: '#00a1e0',
+        steps: [
+          'Go to Reports → create a Contacts report',
+          'Add columns: Name, Email, Account, Title',
+          'Click "Export" → "Details Only" → CSV',
+          'Upload the exported CSV here',
+        ],
+        fields: { firstName: 'First Name', lastName: 'Last Name', email: 'Email', company: 'Account Name', position: 'Title' }
+      },
+      { id: 'hubspot', label: 'HubSpot', icon: '🔶', color: '#ff7a59',
+        steps: [
+          'Go to Contacts → Contacts list',
+          'Click "Export" (top-right)',
+          'Select CSV format and your properties',
+          'Upload the exported file here',
+        ],
+        fields: { firstName: 'First name', lastName: 'Last name', email: 'Email', company: 'Company name', position: 'Job title' }
+      },
+      { id: 'csv', label: 'Generic CSV', icon: '📋', color: '#666',
+        steps: [
+          'Prepare a CSV with columns: Name, Email, Company, Title',
+          'Header row is required (first row = column names)',
+          'Upload the CSV file here',
+        ],
+        fields: { firstName: 'Name', email: 'Email', company: 'Company', position: 'Title' }
+      },
+    ];
+
+    const ContactImportView = () => {
+      const { data, updateData } = useApp();
+      const [selectedSource, setSelectedSource] = useState(null);
+      const [importPreview, setImportPreview] = useState(null);
+      const [importing, setImporting] = useState(false);
+      const importHistory = data.careerAssets?.importHistory || [];
+      const fileInputRef = useRef(null);
+
+      // Parse CSV text into array of objects
+      const parseCSV = (text) => {
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length < 2) return [];
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+        return lines.slice(1).map(line => {
+          // Handle quoted fields with commas
+          const values = [];
+          let current = '';
+          let inQuotes = false;
+          for (const char of line) {
+            if (char === '"') { inQuotes = !inQuotes; }
+            else if (char === ',' && !inQuotes) { values.push(current.trim()); current = ''; }
+            else { current += char; }
+          }
+          values.push(current.trim());
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = (values[i] || '').replace(/^"|"$/g, ''); });
+          return obj;
+        });
+      };
+
+      // Map source fields to CRM contact format
+      const mapToContacts = (rows, source) => {
+        const fields = source.fields;
+        return rows.map(row => {
+          const firstName = row[fields.firstName] || '';
+          const lastName = row[fields.lastName] || '';
+          const name = fields.firstName === 'Name' ? firstName : `${firstName} ${lastName}`.trim();
+          return {
+            id: Date.now() + Math.random(),
+            name: name,
+            email: row[fields.email] || '',
+            company: row[fields.company] || '',
+            title: row[fields.position] || '',
+            category: 'peer',
+            strength: 2,
+            lastContact: row[fields.connectedOn] ? new Date(row[fields.connectedOn]).toISOString().split('T')[0] : '',
+            notes: `Imported from ${source.label}`,
+            tags: [source.id],
+            importedFrom: source.id,
+          };
+        }).filter(c => c.name && c.name.trim());
+      };
+
+      const handleFileSelect = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          const rows = parseCSV(evt.target.result);
+          const source = IMPORT_SOURCES.find(s => s.id === selectedSource) || IMPORT_SOURCES[5];
+          const contacts = mapToContacts(rows, source);
+          setImportPreview({ total: rows.length, contacts: contacts, source: source });
+        };
+        reader.readAsText(file);
+      };
+
+      const executeImport = () => {
+        if (!importPreview) return;
+        setImporting(true);
+        const existingContacts = data.crm?.contacts || [];
+        const existingNames = new Set(existingContacts.map(c => c.name.toLowerCase()));
+        const newContacts = importPreview.contacts.filter(c => !existingNames.has(c.name.toLowerCase()));
+        const allContacts = [...existingContacts, ...newContacts];
+        updateData('crm.contacts', allContacts);
+
+        // Log import
+        const history = data.careerAssets?.importHistory || [];
+        updateData('careerAssets.importHistory', [...history, {
+          id: Date.now(),
+          source: importPreview.source.label,
+          count: newContacts.length,
+          skipped: importPreview.contacts.length - newContacts.length,
+          importedAt: new Date().toISOString(),
+        }]);
+
+        setImporting(false);
+        setImportPreview({ ...importPreview, imported: true, newCount: newContacts.length, skippedCount: importPreview.contacts.length - newContacts.length });
+      };
+
+      return (
+        <div className="fade-in space-y-6">
+          <div className="glass-card p-6 glow">
+            <h1 className="text-2xl font-bold text-white">Contact Import</h1>
+            <p className="text-gray-400 text-sm mt-1">Import your professional contacts from LinkedIn, Gmail, Outlook, Salesforce, HubSpot, or any CSV into your Mini-CRM.</p>
+          </div>
+
+          {/* Source selector */}
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            {IMPORT_SOURCES.map(source => (
+              <button key={source.id} onClick={() => { setSelectedSource(source.id); setImportPreview(null); }}
+                className={`glass-card p-4 text-center hover:bg-white/5 transition-all ${selectedSource === source.id ? 'ring-1' : ''}`}
+                style={selectedSource === source.id ? { borderColor: source.color } : {}}>
+                <span className="text-2xl block mb-2">{source.icon}</span>
+                <p className="text-sm font-bold text-white">{source.label}</p>
+              </button>
+            ))}
+          </div>
+
+          {/* Instructions + upload */}
+          {selectedSource && (() => {
+            const source = IMPORT_SOURCES.find(s => s.id === selectedSource);
+            return (
+              <div className="glass-card p-6">
+                <h3 className="text-sm font-bold text-white mb-3" style={{ color: source.color }}>
+                  {source.icon} How to Export from {source.label}
+                </h3>
+                <ol className="text-xs text-gray-400 space-y-2 list-decimal list-inside mb-4">
+                  {source.steps.map((step, i) => (
+                    <li key={i}><span className="text-gray-300">{step}</span></li>
+                  ))}
+                </ol>
+
+                <div className="border-2 border-dashed border-white/10 rounded-xl p-6 text-center cursor-pointer hover:border-white/20 transition-all"
+                  onClick={() => fileInputRef.current?.click()}>
+                  <input ref={fileInputRef} type="file" accept=".csv" className="hidden" onChange={handleFileSelect} />
+                  <span className="text-2xl block mb-2">📂</span>
+                  <p className="text-sm text-gray-400">Drop your <strong className="text-white">.csv</strong> file here or <strong className="text-brand-400">click to browse</strong></p>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Import preview */}
+          {importPreview && !importPreview.imported && (
+            <div className="glass-card p-6">
+              <h3 className="text-sm font-bold text-white mb-3">Preview: {importPreview.contacts.length} contacts found</h3>
+              <div className="max-h-48 overflow-y-auto space-y-1 mb-4">
+                {importPreview.contacts.slice(0, 20).map((c, i) => (
+                  <div key={i} className="flex items-center gap-3 text-xs py-1 border-b border-white/5">
+                    <span className="text-white font-medium w-40 truncate">{c.name}</span>
+                    <span className="text-gray-500 w-32 truncate">{c.company}</span>
+                    <span className="text-gray-600 truncate">{c.email}</span>
+                  </div>
+                ))}
+                {importPreview.contacts.length > 20 && (
+                  <p className="text-[10px] text-gray-600">...and {importPreview.contacts.length - 20} more</p>
+                )}
+              </div>
+              <Button onClick={executeImport}>
+                Import {importPreview.contacts.length} Contacts to CRM
+              </Button>
+            </div>
+          )}
+
+          {/* Import success */}
+          {importPreview?.imported && (
+            <div className="glass-card p-6 text-center" style={{ borderColor: '#2d6a4f30', borderWidth: '1px' }}>
+              <span className="text-3xl block mb-2">✅</span>
+              <h3 className="text-lg font-bold text-white mb-1">Import Complete!</h3>
+              <p className="text-sm text-gray-400">
+                <strong className="text-green-400">{importPreview.newCount}</strong> new contacts added
+                {importPreview.skippedCount > 0 && (
+                  <span> • <strong className="text-yellow-400">{importPreview.skippedCount}</strong> duplicates skipped</span>
+                )}
+              </p>
+              <button onClick={() => { setImportPreview(null); setSelectedSource(null); }}
+                className="mt-3 text-xs text-brand-400 hover:text-brand-300">Import more →</button>
+            </div>
+          )}
+
+          {/* Import history */}
+          {importHistory.length > 0 && (
+            <div className="glass-card p-5">
+              <h3 className="text-sm font-bold text-white mb-3">Import History</h3>
+              {importHistory.map(h => (
+                <div key={h.id} className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
+                  <div>
+                    <p className="text-xs font-medium text-white">{h.source}</p>
+                    <p className="text-[10px] text-gray-500">{new Date(h.importedAt).toLocaleDateString()}</p>
+                  </div>
+                  <p className="text-xs text-green-400 font-bold">+{h.count} contacts</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ============================================================
     // MINI-CRM — Contact & Relationship Management
     // Manages professional contacts, tracks relationship strength,
     // logs outreach activities, and cross-references with Node Map
@@ -8929,6 +9506,8 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
         'learning-hub': LearningHubView,
         'ai-trainer': AITrainerView,
         'ai-coach': AICoachView,
+        'career-assets': CareerAssetsView,
+        'contact-import': ContactImportView,
         'mini-crm': MiniCRMView,
       };
 
