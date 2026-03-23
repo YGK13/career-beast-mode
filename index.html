@@ -199,6 +199,7 @@
       { id: 'contact-import', label: 'Contact Import', icon: '📥', section: 'resources' },
       { id: 'mini-crm', label: 'Mini-CRM', icon: '📇', section: 'resources' },
       { id: 'ai-coach', label: 'AI Coach', icon: '🧠', section: 'resources' },
+      { id: 'settings', label: 'Settings', icon: '⚙️', section: 'resources' },
       { id: 'learning-hub', label: 'Learning Hub', icon: '📚', section: 'resources' },
       { id: 'ai-trainer', label: 'Monetize as AI Trainer', icon: '💰', section: 'resources' },
       // ENGAGEMENT
@@ -523,6 +524,12 @@
       crm: {
         contacts: [],        // [{ id, name, email, company, title, category, strength, lastContact, notes, tags }]
         activities: [],      // [{ id, contactId, type, date, subject, notes }]
+      },
+      // API Keys — user-provided keys for live AI and integrations
+      apiKeys: {
+        anthropic: '',    // User's Anthropic API key for live AI Coach
+        supabaseUrl: '',  // Supabase project URL
+        supabaseKey: '',  // Supabase anon key
       },
       // Auth & Subscription (scaffolding — activates when Supabase/Stripe connected)
       auth: {
@@ -1665,7 +1672,7 @@
 
       // Auto-expand the phase that contains the active tool
       useEffect(() => {
-        if (activeView === 'dashboard' || activeView === 'learning-hub' || activeView === 'ai-trainer' || activeView === 'ai-coach' || activeView === 'mini-crm' || activeView === 'career-assets' || activeView === 'contact-import' || activeView === 'progress') return;
+        if (activeView === 'dashboard' || activeView === 'learning-hub' || activeView === 'ai-trainer' || activeView === 'ai-coach' || activeView === 'mini-crm' || activeView === 'career-assets' || activeView === 'contact-import' || activeView === 'settings' || activeView === 'progress') return;
         for (const phase of JOURNEY_PHASES) {
           const tools = getPhaseTools(phase.id, track);
           if (tools.includes(activeView)) {
@@ -1854,6 +1861,11 @@
                 className={`nav-item w-full text-left px-5 py-2.5 flex items-center gap-3 text-sm ${activeView === 'progress' ? 'active text-white' : 'text-gray-400'}`}>
                 <span className="w-5 text-center opacity-60">▲</span>
                 <span>Progress & Streaks</span>
+              </button>
+              <button onClick={() => setActiveView('settings')}
+                className={`nav-item w-full text-left px-5 py-2.5 flex items-center gap-3 text-sm ${activeView === 'settings' ? 'active text-white' : 'text-gray-400'}`}>
+                <span className="w-5 text-center opacity-60">⚙️</span>
+                <span>Settings</span>
               </button>
             </div>
           </nav>
@@ -7804,7 +7816,81 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
         setMessages([{ role: 'assistant', content: openingMsg }]);
       };
 
-      // Send a message (simulated response for now — will connect to Claude API in Step 2)
+      // Build system prompt for Claude API — incorporates all user data + Career Assets
+      const buildSystemPrompt = () => {
+        const assets = data.careerAssets?.documents || [];
+        const assetText = assets.slice(0, 5).map(a => {
+          const preview = (a.content || '').substring(0, 1500);
+          return `[${a.category}] ${a.name}:\n${preview}`;
+        }).join('\n\n');
+
+        return `You are the AI Career Coach for Career Beast Mode — a career transformation platform that helps professionals close the AI Wage Gap.
+
+COACHING CONTEXT:
+- User: ${data.user?.name || 'User'}, ${data.user?.role || 'Professional'} in ${data.user?.industry || 'Technology'}
+- Track: ${track === 'operator' ? 'AI Champion (corporate leadership)' : 'Builder / Founder (independent)'}
+- Beast Score: ${beastData.beastScore}/100 (${beastData.level.label})
+- Weakest dimension: ${Object.entries(beastData.dimensions).sort(([,a],[,b]) => a - b)[0]?.[0]?.replace(/_/g, ' ') || 'not assessed'}
+- Tools completed: ${(data.taskAudit?.tasks || []).length > 0 ? 'AI Task Audit' : 'None yet'}
+- Current phase: ${data.journey?.currentPhase || 1} of 6
+
+CURRENT COACHING FLOW: ${activeFlow.title}
+${activeFlow.subtitle}
+
+${assets.length > 0 ? `CAREER ASSETS (${assets.length} documents uploaded):\n${assetText}` : 'No career assets uploaded yet — encourage the user to upload their LinkedIn PDF and resume in Career Assets for more personalized advice.'}
+
+COACHING STYLE:
+- Be direct and specific. No generic advice.
+- Reference the user's actual data, scores, and uploaded documents.
+- Give concrete, actionable next steps with timelines.
+- Be honest about gaps — don't sugarcoat, but always end with an achievable action.
+- Use the user's name when appropriate.
+- Keep responses focused and structured with bold headers.
+- Ask follow-up questions to dig deeper.`;
+      };
+
+      // Call Claude API directly (client-side — for MVP; move to serverless function for production)
+      const callClaudeAPI = async (userText, conversationHistory) => {
+        const apiKey = data.apiKeys?.anthropic;
+        if (!apiKey) return null;
+
+        try {
+          const systemPrompt = buildSystemPrompt();
+          const apiMessages = conversationHistory
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .slice(-10) // Last 10 messages for context
+            .concat([{ role: 'user', content: userText }]);
+
+          const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true',
+            },
+            body: JSON.stringify({
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 1024,
+              system: systemPrompt,
+              messages: apiMessages,
+            }),
+          });
+
+          if (!response.ok) {
+            console.error('Claude API error:', response.status);
+            return null; // Fall back to simulated
+          }
+
+          const result = await response.json();
+          return result.content?.[0]?.text || null;
+        } catch (err) {
+          console.error('Claude API call failed:', err);
+          return null; // Fall back to simulated
+        }
+      };
+
+      // Send a message — tries Claude API first, falls back to simulated
       const sendMessage = async (text) => {
         if (!text.trim() || isTyping) return;
 
@@ -7813,20 +7899,27 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
         setInputText('');
         setIsTyping(true);
 
-        // Simulate AI response delay (replace with actual Claude API call when backend is ready)
-        await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
+        let responseText = null;
 
-        // Generate a contextual simulated response based on the flow type
-        const simResponse = generateSimulatedResponse(activeFlow, text.trim(), beastData, track, data);
+        // Try Claude API if key is configured
+        if (data.apiKeys?.anthropic) {
+          responseText = await callClaudeAPI(text.trim(), messages);
+        }
 
-        setMessages(prev => [...prev, { role: 'assistant', content: simResponse }]);
+        // Fall back to simulated response if no API key or API call failed
+        if (!responseText) {
+          await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
+          responseText = generateSimulatedResponse(activeFlow, text.trim(), beastData, track, data);
+        }
+
+        setMessages(prev => [...prev, { role: 'assistant', content: responseText }]);
         setIsTyping(false);
 
         // Save session to data
         const sessionData = {
           id: Date.now().toString(),
           type: activeFlow.id,
-          messages: [...messages, userMsg, { role: 'assistant', content: simResponse }],
+          messages: [...messages, userMsg, { role: 'assistant', content: responseText }],
           startedAt: new Date().toISOString(),
         };
         updateData('coaching', {
@@ -8036,7 +8129,10 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
               </button>
             </div>
             <p className="text-[9px] text-gray-600 mt-2 text-center">
-              AI coaching uses your Beast Score and tool data for personalized advice. Connect Claude API for live AI responses.
+              {data.apiKeys?.anthropic
+                ? '🟢 Live AI — Powered by Claude. Responses use your Beast Score, Career Assets, and tool data.'
+                : 'AI coaching uses your Beast Score and tool data. Add your Anthropic API key in Settings for live AI responses.'
+              }
             </p>
           </div>
         </div>
@@ -8885,6 +8981,202 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
     };
 
     // ============================================================
+    // ============================================================
+    // SETTINGS — API Keys, Integrations, Data Management
+    // ============================================================
+
+    const SettingsView = () => {
+      const { data, updateData } = useApp();
+      const [anthropicKey, setAnthropicKey] = useState(data.apiKeys?.anthropic || '');
+      const [supabaseUrl, setSupabaseUrl] = useState(data.apiKeys?.supabaseUrl || '');
+      const [supabaseKey, setSupabaseKey] = useState(data.apiKeys?.supabaseKey || '');
+      const [saved, setSaved] = useState('');
+      const [testResult, setTestResult] = useState(null);
+
+      const saveKeys = () => {
+        updateData('apiKeys', {
+          anthropic: anthropicKey.trim(),
+          supabaseUrl: supabaseUrl.trim(),
+          supabaseKey: supabaseKey.trim(),
+        });
+        setSaved('Saved!');
+        setTimeout(() => setSaved(''), 2000);
+      };
+
+      // Test Claude API connection
+      const testClaudeAPI = async () => {
+        if (!anthropicKey.trim()) { setTestResult({ ok: false, msg: 'No API key entered' }); return; }
+        setTestResult({ ok: null, msg: 'Testing...' });
+        try {
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': anthropicKey.trim(),
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true',
+            },
+            body: JSON.stringify({
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 50,
+              messages: [{ role: 'user', content: 'Say "Connected!" in one word.' }],
+            }),
+          });
+          if (resp.ok) {
+            const result = await resp.json();
+            setTestResult({ ok: true, msg: `Connected! Model responded: "${(result.content?.[0]?.text || '').substring(0, 50)}"` });
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            setTestResult({ ok: false, msg: `Error ${resp.status}: ${err.error?.message || 'Unknown error'}` });
+          }
+        } catch (e) {
+          setTestResult({ ok: false, msg: `Network error: ${e.message}` });
+        }
+      };
+
+      // Export all data as JSON
+      const exportData = () => {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `career-beast-mode-backup-${new Date().toISOString().split('T')[0]}.json`;
+        a.click(); URL.revokeObjectURL(url);
+      };
+
+      // Import data from JSON
+      const importData = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const imported = JSON.parse(evt.target.result);
+            if (imported.user && imported.scorecard) {
+              Object.keys(imported).forEach(key => updateData(key, imported[key]));
+              alert('Data imported successfully! Refresh to see changes.');
+            } else {
+              alert('Invalid backup file — missing required fields.');
+            }
+          } catch { alert('Failed to parse JSON file.'); }
+        };
+        reader.readAsText(file);
+      };
+
+      const toolsDone = (data.taskAudit?.tasks || []).length > 0 ? 1 : 0;
+      const totalAssets = (data.careerAssets?.documents || []).length;
+      const totalContacts = (data.crm?.contacts || []).length;
+
+      return (
+        <div className="fade-in space-y-6">
+          <SectionHeader title="Settings" subtitle="API keys, integrations, and data management" />
+
+          {/* API Keys */}
+          <div className="glass-card p-6">
+            <h3 className="text-sm font-bold text-white mb-4">🔑 API Keys</h3>
+
+            {/* Anthropic / Claude */}
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 block mb-1">Anthropic API Key (for live AI Coach)</label>
+              <div className="flex gap-2">
+                <input type="password" value={anthropicKey}
+                  onChange={e => setAnthropicKey(e.target.value)}
+                  placeholder="sk-ant-api03-..."
+                  className="flex-1 px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-600 outline-none text-sm font-mono" />
+                <button onClick={testClaudeAPI}
+                  className="px-3 py-2 rounded-xl glass text-xs text-gray-400 hover:text-white transition-all">
+                  Test
+                </button>
+              </div>
+              {testResult && (
+                <p className={`text-xs mt-1 ${testResult.ok === true ? 'text-green-400' : testResult.ok === false ? 'text-red-400' : 'text-yellow-400'}`}>
+                  {testResult.msg}
+                </p>
+              )}
+              <p className="text-[10px] text-gray-600 mt-1">
+                Get your key at <a href="https://console.anthropic.com/settings/keys" target="_blank" className="text-brand-400 hover:underline">console.anthropic.com</a>.
+                {anthropicKey ? ' ✅ Key configured — AI Coach will use live Claude responses.' : ' Without a key, AI Coach uses simulated responses.'}
+              </p>
+            </div>
+
+            {/* Supabase */}
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 block mb-1">Supabase Project URL</label>
+              <input type="text" value={supabaseUrl}
+                onChange={e => setSupabaseUrl(e.target.value)}
+                placeholder="https://xxxxx.supabase.co"
+                className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-600 outline-none text-sm font-mono mb-2" />
+              <label className="text-xs text-gray-400 block mb-1">Supabase Anon Key</label>
+              <input type="password" value={supabaseKey}
+                onChange={e => setSupabaseKey(e.target.value)}
+                placeholder="eyJhbGciOiJ..."
+                className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white placeholder-gray-600 outline-none text-sm font-mono" />
+              <p className="text-[10px] text-gray-600 mt-1">
+                For cloud sync and user accounts. Get keys at <a href="https://supabase.com/dashboard" target="_blank" className="text-brand-400 hover:underline">supabase.com/dashboard</a> → Settings → API.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Button onClick={saveKeys}>Save Keys</Button>
+              {saved && <span className="text-xs text-green-400 font-bold">{saved}</span>}
+            </div>
+          </div>
+
+          {/* Data Summary */}
+          <div className="glass-card p-6">
+            <h3 className="text-sm font-bold text-white mb-3">📊 Your Data Summary</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                { label: 'Beast Score', value: `${(calculateBeastScore(data)).beastScore}/100` },
+                { label: 'Career Assets', value: totalAssets },
+                { label: 'CRM Contacts', value: totalContacts },
+                { label: 'Coach Sessions', value: data.coaching?.sessionsUsed || 0 },
+              ].map(s => (
+                <div key={s.label} className="glass rounded-xl p-3 text-center">
+                  <p className="text-lg font-bold text-white">{s.value}</p>
+                  <p className="text-[9px] text-gray-500 uppercase">{s.label}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Data Management */}
+          <div className="glass-card p-6">
+            <h3 className="text-sm font-bold text-white mb-3">💾 Data Management</h3>
+            <p className="text-xs text-gray-400 mb-4">Your data is stored locally in your browser. Export a backup before clearing or to move between devices.</p>
+            <div className="flex flex-wrap gap-3">
+              <button onClick={exportData} className="px-4 py-2 rounded-xl glass text-xs text-gray-300 hover:text-white transition-all">
+                📥 Export Backup (JSON)
+              </button>
+              <label className="px-4 py-2 rounded-xl glass text-xs text-gray-300 hover:text-white transition-all cursor-pointer">
+                📤 Import Backup
+                <input type="file" accept=".json" className="hidden" onChange={importData} />
+              </label>
+              <button onClick={() => {
+                if (confirm('Are you sure? This will delete ALL your data including scores, assets, contacts, and coaching sessions. This cannot be undone.')) {
+                  localStorage.removeItem('career-beast-mode-data');
+                  window.location.reload();
+                }
+              }} className="px-4 py-2 rounded-xl text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-all">
+                🗑️ Reset All Data
+              </button>
+            </div>
+          </div>
+
+          {/* Version Info */}
+          <div className="glass-card p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold text-white">Career Beast Mode v1.2</p>
+                <p className="text-[10px] text-gray-500">48 tools • 6 phases • AI Coach • Career Assets • Mini-CRM</p>
+              </div>
+              <a href="https://github.com/YGK13/career-beast-mode" target="_blank"
+                className="text-xs text-brand-400 hover:text-brand-300">GitHub →</a>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
     // PROGRESS & STREAKS VIEW
     // ============================================================
 
@@ -9586,6 +9878,7 @@ Play both sides — be the coach, and when asked, roleplay as the hiring manager
         'career-assets': CareerAssetsView,
         'contact-import': ContactImportView,
         'mini-crm': MiniCRMView,
+        'settings': SettingsView,
       };
 
       const ActiveComponent = views[activeView] || Dashboard;
