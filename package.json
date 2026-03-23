@@ -1,0 +1,14 @@
+{
+  "name": "career-beast-mode",
+  "version": "1.0.0",
+  "description": "Career Beast Mode — Close Your AI Wage Gap. 48-tool career transformation platform.",
+  "private": true,
+  "scripts": {
+    "dev": "npx serve . -p 3001 -s",
+    "start": "npx serve . -p 3001 -s",
+    "build": "echo 'Static site — no build step required'"
+  },
+  "keywords": ["career", "ai", "wage-gap", "beast-mode"],
+  "author": "Yuri Kruman",
+  "license": "PROPRIETARY"
+}
