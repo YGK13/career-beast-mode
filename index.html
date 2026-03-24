@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Career Beast Mode — Close Your AI Wage Gap</title>
+  <!-- Supabase JS Client (CDN) — must load before React -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -119,9 +121,48 @@
     const STORAGE_KEY = 'career_beast_mode_v1';
 
     // ============================================================
+    // SUPABASE — Auth + Cloud Sync Configuration
+    // Anon key is safe to expose client-side; RLS policies protect data.
+    // ============================================================
+
+    const SUPABASE_URL = 'https://ziesugvzwgxxorniuuom.supabase.co';
+    const SUPABASE_ANON_KEY = 'sb_publishable_khI5llW3kUbpXxr_PhFmTw_329UWGch';
+
+    // Initialize Supabase client (global `supabase` from CDN)
+    let supabaseClient = null;
+    try {
+      if (typeof supabase !== 'undefined' && supabase.createClient) {
+        supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        console.log('[Supabase] Client initialized');
+      }
+    } catch (err) {
+      console.warn('[Supabase] Failed to initialize:', err.message);
+    }
+
+    // ============================================================
     // SUBSCRIPTION TIERS — pricing & feature gating configuration
     // Free tier works with localStorage only. Pro+ requires auth.
     // ============================================================
+
+    // ============================================================
+    // STRIPE CONFIGURATION
+    // Payment Links — no backend needed. Replace these with your
+    // actual Stripe Payment Link IDs once created in Stripe Dashboard.
+    // Dashboard → Payment Links → Create → copy the link URL.
+    // Format: https://buy.stripe.com/XXXXXXXXX
+    // ============================================================
+    const STRIPE_CONFIG = {
+      // Set to true once you create Payment Links in Stripe Dashboard
+      enabled: false,
+      // Replace with your Stripe Payment Link URLs
+      paymentLinks: {
+        pro:       'https://buy.stripe.com/test_pro_placeholder',
+        premium:   'https://buy.stripe.com/test_premium_placeholder',
+        executive: 'https://buy.stripe.com/test_executive_placeholder',
+      },
+      // Customer portal for managing subscriptions
+      customerPortal: 'https://billing.stripe.com/p/login/test_placeholder',
+    };
 
     const SUBSCRIPTION_TIERS = {
       free:      { id: 'free', name: 'Free', price: 0, color: '#666', icon: '○',
@@ -432,9 +473,31 @@
       return getDefaultData();
     };
 
+    // Debounced cloud sync — saves to Supabase 2s after last change
+    let _cloudSyncTimeout = null;
+    const _debouncedCloudSync = (data) => {
+      if (_cloudSyncTimeout) clearTimeout(_cloudSyncTimeout);
+      _cloudSyncTimeout = setTimeout(async () => {
+        try {
+          if (!supabaseClient) return;
+          const { data: { session } } = await supabaseClient.auth.getSession();
+          if (!session?.user) return;
+          const { error } = await supabaseClient
+            .from('user_data')
+            .upsert({ user_id: session.user.id, app_data: data, updated_at: new Date().toISOString() },
+              { onConflict: 'user_id' });
+          if (error) console.warn('[AutoSync] Error:', error.message);
+          else console.log('[AutoSync] Saved to cloud');
+        } catch (err) { console.warn('[AutoSync] Failed:', err); }
+      }, 2000);
+    };
+
     const saveData = (data) => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...data, lastSaved: new Date().toISOString(), version: APP_VERSION }));
+        const toSave = { ...data, lastSaved: new Date().toISOString(), version: APP_VERSION };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+        // Also sync to Supabase (debounced)
+        _debouncedCloudSync(toSave);
       } catch (e) { console.error('Failed to save data:', e); }
     };
 
@@ -541,6 +604,142 @@
       streaks: { lastVisit: null, currentStreak: 0, longestStreak: 0, totalVisits: 0, toolCompletions: [] },
       history: []
     });
+
+    // ============================================================
+    // AUTH CONTEXT — Supabase session state + OAuth flows
+    // Manages sign-in, sign-out, and exposes user/session to app.
+    // Works independently of AppContext so auth can wrap the whole app.
+    // ============================================================
+
+    const AuthContext = createContext(null);
+
+    const AuthProvider = ({ children }) => {
+      const [session, setSession] = useState(null);
+      const [authUser, setAuthUser] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | synced | error
+
+      useEffect(() => {
+        if (!supabaseClient) { setAuthLoading(false); return; }
+
+        // 1. Check existing session on mount
+        supabaseClient.auth.getSession().then(({ data: { session: s } }) => {
+          setSession(s);
+          setAuthUser(s?.user ?? null);
+          setAuthLoading(false);
+        });
+
+        // 2. Listen for auth state changes
+        const { data: { subscription } } = supabaseClient.auth.onAuthStateChange(
+          (_event, s) => {
+            setSession(s);
+            setAuthUser(s?.user ?? null);
+            setAuthLoading(false);
+          }
+        );
+
+        return () => subscription.unsubscribe();
+      }, []);
+
+      // Google OAuth — redirect flow
+      const signInWithGoogle = async () => {
+        if (!supabaseClient) return;
+        const { error } = await supabaseClient.auth.signInWithOAuth({
+          provider: 'google',
+          options: { redirectTo: window.location.origin + window.location.pathname },
+        });
+        if (error) console.error('[Auth] Google sign-in error:', error.message);
+      };
+
+      // GitHub OAuth
+      const signInWithGitHub = async () => {
+        if (!supabaseClient) return;
+        const { error } = await supabaseClient.auth.signInWithOAuth({
+          provider: 'github',
+          options: { redirectTo: window.location.origin + window.location.pathname },
+        });
+        if (error) console.error('[Auth] GitHub sign-in error:', error.message);
+      };
+
+      // Magic link (email)
+      const signInWithEmail = async (email) => {
+        if (!supabaseClient) return { error: 'Supabase not initialized' };
+        const { error } = await supabaseClient.auth.signInWithOtp({
+          email,
+          options: { emailRedirectTo: window.location.origin + window.location.pathname },
+        });
+        if (error) console.error('[Auth] Magic link error:', error.message);
+        return { error };
+      };
+
+      // Sign out
+      const signOut = async () => {
+        if (!supabaseClient) return;
+        const { error } = await supabaseClient.auth.signOut();
+        if (error) console.error('[Auth] Sign-out error:', error.message);
+      };
+
+      // Upload localStorage data to Supabase
+      const uploadLocalData = useCallback(async () => {
+        if (!supabaseClient || !authUser) return;
+        setSyncStatus('syncing');
+        try {
+          const localRaw = localStorage.getItem(STORAGE_KEY);
+          const localData = localRaw ? JSON.parse(localRaw) : {};
+          const { error } = await supabaseClient
+            .from('user_data')
+            .upsert({ user_id: authUser.id, app_data: localData, updated_at: new Date().toISOString() },
+              { onConflict: 'user_id' });
+          if (error) throw error;
+          setSyncStatus('synced');
+          console.log('[Sync] Data uploaded to Supabase');
+        } catch (err) {
+          console.error('[Sync] Upload error:', err);
+          setSyncStatus('error');
+        }
+      }, [authUser]);
+
+      // Download cloud data into localStorage
+      const downloadCloudData = useCallback(async () => {
+        if (!supabaseClient || !authUser) return null;
+        setSyncStatus('syncing');
+        try {
+          const { data: row, error } = await supabaseClient
+            .from('user_data')
+            .select('app_data, updated_at')
+            .eq('user_id', authUser.id)
+            .maybeSingle();
+          if (error) throw error;
+          if (row && row.app_data) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(row.app_data));
+            setSyncStatus('synced');
+            console.log('[Sync] Data loaded from Supabase');
+            return row;
+          }
+          setSyncStatus('idle');
+          return null;
+        } catch (err) {
+          console.error('[Sync] Download error:', err);
+          setSyncStatus('error');
+          return null;
+        }
+      }, [authUser]);
+
+      const value = {
+        session, user: authUser, loading: authLoading, syncStatus,
+        signInWithGoogle, signInWithGitHub, signInWithEmail, signOut,
+        uploadLocalData, downloadCloudData, setSyncStatus,
+        isAuthenticated: !!authUser,
+      };
+
+      return React.createElement(AuthContext.Provider, { value }, children);
+    };
+
+    const useAuth = () => {
+      const ctx = useContext(AuthContext);
+      if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+      return ctx;
+    };
 
     // ============================================================
     // APP CONTEXT — global state
@@ -1886,34 +2085,37 @@
               </div>
               <span className="text-[9px] text-gray-600">Switch ↔</span>
             </button>
-            {/* Auth status / Sign in button */}
-            {data.auth?.isAuthenticated ? (
-              <div className="glass rounded-lg p-2 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-brand-500/20 flex items-center justify-center text-[10px] font-bold text-brand-400">
-                  {(data.auth.user?.name || data.user.name || '?')[0].toUpperCase()}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[10px] text-gray-400 truncate">{data.auth.user?.email || 'Signed in'}</p>
-                  <p className="text-[9px] font-bold uppercase" style={{ color: SUBSCRIPTION_TIERS[data.auth.tier]?.color || '#666' }}>
-                    {SUBSCRIPTION_TIERS[data.auth.tier]?.icon} {SUBSCRIPTION_TIERS[data.auth.tier]?.name || 'Free'}
-                  </p>
-                </div>
-                {data.auth.tier === 'free' && (
-                  <button onClick={() => { setLoginModalMode('pricing'); setShowLoginModal(true); }}
-                    className="px-2 py-1 rounded text-[9px] font-bold text-beast-orange bg-beast-orange/10 hover:bg-beast-orange/20 transition-all">
-                    Upgrade
+            {/* Auth status / Sign in — uses real Supabase auth */}
+            {(() => {
+              // Access auth context via a mini-component pattern
+              const auth = (() => { try { return useAuth(); } catch(e) { return null; } })();
+              const isLoggedIn = auth?.isAuthenticated;
+              return isLoggedIn ? (
+                <div className="glass rounded-lg p-2 flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full bg-brand-500/20 flex items-center justify-center text-[10px] font-bold text-brand-400">
+                    {(auth.user?.user_metadata?.full_name || auth.user?.email || '?')[0].toUpperCase()}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[10px] text-gray-400 truncate">{auth.user?.email || 'Signed in'}</p>
+                    <p className="text-[9px] font-bold text-green-400 flex items-center gap-1">
+                      {auth.syncStatus === 'syncing' ? '↻ Syncing...' : auth.syncStatus === 'synced' ? '✓ Cloud synced' : '☁ Connected'}
+                    </p>
+                  </div>
+                  <button onClick={auth.signOut}
+                    className="px-2 py-1 rounded text-[9px] font-bold text-gray-500 hover:text-red-400 transition-all">
+                    Sign out
                   </button>
-                )}
-              </div>
-            ) : (
-              <button onClick={() => { setLoginModalMode('login'); setShowLoginModal(true); }}
-                className="w-full glass rounded-lg p-2.5 flex items-center justify-center gap-2 hover:bg-white/5 transition-all group">
-                <span className="text-xs text-gray-400 group-hover:text-white">Sign in</span>
-                <span className="text-[9px] text-beast-orange font-bold">→ Unlock Pro</span>
-              </button>
-            )}
+                </div>
+              ) : (
+                <button onClick={() => { setLoginModalMode('login'); setShowLoginModal(true); }}
+                  className="w-full glass rounded-lg p-2.5 flex items-center justify-center gap-2 hover:bg-white/5 transition-all group">
+                  <span className="text-xs text-gray-400 group-hover:text-white">Sign in</span>
+                  <span className="text-[9px] text-beast-orange font-bold">→ Unlock Pro</span>
+                </button>
+              );
+            })()}
             <div className="glass rounded-xl p-2">
-              <p className="text-[10px] text-gray-500">v{APP_VERSION} — Data saved locally</p>
+              <p className="text-[10px] text-gray-500">v{APP_VERSION} — {(() => { try { return useAuth()?.isAuthenticated ? 'Cloud synced' : 'Data saved locally'; } catch(e) { return 'Data saved locally'; } })()}</p>
             </div>
           </div>
         </div>
@@ -9139,6 +9341,40 @@ COACHING STYLE:
             </div>
           </div>
 
+          {/* Subscription Management */}
+          <div className="glass-card p-6">
+            <h3 className="text-sm font-bold text-white mb-3">💳 Subscription</h3>
+            <div className="flex items-center gap-4 mb-3">
+              <div className="flex-1">
+                <p className="text-sm text-white font-medium">
+                  Current Plan: <span style={{ color: SUBSCRIPTION_TIERS[data.auth?.tier || 'free'].color }}>
+                    {SUBSCRIPTION_TIERS[data.auth?.tier || 'free'].icon} {SUBSCRIPTION_TIERS[data.auth?.tier || 'free'].name}
+                  </span>
+                </p>
+                <p className="text-[10px] text-gray-500 mt-1">
+                  {data.auth?.tier && data.auth.tier !== 'free'
+                    ? 'Manage your subscription, update payment method, or cancel anytime.'
+                    : 'Upgrade to unlock all 6 phases, AI coaching, Mini-CRM, and PDF export.'}
+                </p>
+              </div>
+              {data.auth?.tier && data.auth.tier !== 'free' ? (
+                <button onClick={() => {
+                  if (STRIPE_CONFIG.enabled) window.open(STRIPE_CONFIG.customerPortal, '_blank');
+                  else alert('Stripe customer portal not configured yet.');
+                }}
+                  className="px-4 py-2 rounded-xl glass text-xs text-gray-300 hover:text-white transition-all">
+                  Manage Subscription →
+                </button>
+              ) : (
+                <button onClick={() => setShowAuth(true)}
+                  className="px-4 py-2 rounded-xl font-bold text-xs text-white transition-all hover:scale-105"
+                  style={{ background: 'linear-gradient(135deg, #ff6b35, #e63946)' }}>
+                  Upgrade Now
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Data Management */}
           <div className="glass-card p-6">
             <h3 className="text-sm font-bold text-white mb-3">💾 Data Management</h3>
@@ -9647,6 +9883,21 @@ COACHING STYLE:
     // Login Modal — shown when user clicks "Sign In" or upgrade CTA
     const LoginModal = ({ onClose, mode = 'login' }) => {
       const [activeTab, setActiveTab] = useState(mode); // 'login' | 'pricing'
+      const { signInWithGoogle, signInWithGitHub, signInWithEmail, user } = useAuth();
+      const [email, setEmail] = useState('');
+      const [magicLinkSent, setMagicLinkSent] = useState(false);
+      const [authError, setAuthError] = useState('');
+
+      const handleMagicLink = async () => {
+        if (!email.trim() || !email.includes('@')) { setAuthError('Enter a valid email'); return; }
+        setAuthError('');
+        const result = await signInWithEmail(email);
+        if (result?.error) { setAuthError(result.error.message || 'Failed to send magic link'); }
+        else { setMagicLinkSent(true); }
+      };
+
+      // If user just signed in (redirect callback), close modal
+      useEffect(() => { if (user) onClose(); }, [user]);
 
       return (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -9671,18 +9922,22 @@ COACHING STYLE:
                   <p className="text-xs text-gray-400 mt-1">Sync your data across devices and unlock Pro features</p>
                 </div>
 
-                {/* OAuth buttons — styled and ready, will connect to Supabase Auth */}
-                <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all group">
+                {!supabaseClient && (
+                  <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                    <p className="text-xs text-yellow-400">Supabase not connected. Auth requires a valid Supabase project.</p>
+                  </div>
+                )}
+
+                {/* Google OAuth — LIVE via Supabase */}
+                <button onClick={signInWithGoogle} disabled={!supabaseClient}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all group disabled:opacity-40">
                   <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
                   <span className="text-sm text-gray-300 group-hover:text-white">Continue with Google</span>
                 </button>
 
-                <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all group">
-                  <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="#0A66C2" d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
-                  <span className="text-sm text-gray-300 group-hover:text-white">Continue with LinkedIn</span>
-                </button>
-
-                <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all group">
+                {/* GitHub OAuth — LIVE via Supabase */}
+                <button onClick={signInWithGitHub} disabled={!supabaseClient}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-white/10 hover:bg-white/5 transition-all group disabled:opacity-40">
                   <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="#fff" d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/></svg>
                   <span className="text-sm text-gray-300 group-hover:text-white">Continue with GitHub</span>
                 </button>
@@ -9693,14 +9948,25 @@ COACHING STYLE:
                   <div className="flex-1 h-px bg-white/10" />
                 </div>
 
-                <div className="space-y-3">
-                  <input type="email" placeholder="Email address"
-                    className="w-full bg-transparent border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500/50" />
-                  <button className="w-full px-4 py-3 rounded-xl font-bold text-sm text-white transition-all hover:scale-[1.02] active:scale-95"
-                    style={{ background: 'linear-gradient(135deg, #ff6b35, #e63946)' }}>
-                    Send Magic Link
-                  </button>
-                </div>
+                {/* Magic link — LIVE via Supabase */}
+                {magicLinkSent ? (
+                  <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20 text-center">
+                    <p className="text-sm text-green-400 font-bold">Magic link sent!</p>
+                    <p className="text-xs text-gray-400 mt-1">Check your email ({email}) and click the link to sign in.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+                      placeholder="Email address" onKeyDown={e => e.key === 'Enter' && handleMagicLink()}
+                      className="w-full bg-transparent border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500/50" />
+                    {authError && <p className="text-xs text-red-400">{authError}</p>}
+                    <button onClick={handleMagicLink} disabled={!supabaseClient}
+                      className="w-full px-4 py-3 rounded-xl font-bold text-sm text-white transition-all hover:scale-[1.02] active:scale-95 disabled:opacity-40"
+                      style={{ background: 'linear-gradient(135deg, #ff6b35, #e63946)' }}>
+                      Send Magic Link
+                    </button>
+                  </div>
+                )}
 
                 <p className="text-[9px] text-gray-600 text-center mt-2">
                   Free accounts get Phase 1 tools + Beast Score. Upgrade anytime for full access.
@@ -9733,7 +9999,17 @@ COACHING STYLE:
                         {tier.signals && <li className="text-[10px] text-gray-400">✓ Signal listeners</li>}
                         {tier.id === 'executive' && <li className="text-[10px] text-gray-400">✓ Quarterly strategy call</li>}
                       </ul>
-                      <button className="w-full mt-3 px-3 py-2 rounded-lg font-bold text-xs transition-all hover:scale-105"
+                      <button onClick={() => {
+                          if (STRIPE_CONFIG.enabled && STRIPE_CONFIG.paymentLinks[tier.id]) {
+                            // Redirect to Stripe Payment Link with prefilled email
+                            const url = new URL(STRIPE_CONFIG.paymentLinks[tier.id]);
+                            if (authUser?.email) url.searchParams.set('prefilled_email', authUser.email);
+                            window.open(url.toString(), '_blank');
+                          } else {
+                            alert(`Stripe not configured yet. To activate ${tier.name} plan:\n\n1. Create a Stripe account at stripe.com\n2. Create Payment Links for each plan\n3. Update STRIPE_CONFIG in index.html\n\nOr contact support to activate your plan.`);
+                          }
+                        }}
+                        className="w-full mt-3 px-3 py-2 rounded-lg font-bold text-xs transition-all hover:scale-105"
                         style={{ background: tier.id === 'premium' ? 'linear-gradient(135deg, #ff6b35, #e63946)' : `${tier.color}20`, color: tier.id === 'premium' ? '#fff' : tier.color }}>
                         {tier.id === 'premium' ? 'Start Free Trial' : 'Choose Plan'}
                       </button>
@@ -9947,8 +10223,10 @@ COACHING STYLE:
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(
-      React.createElement(AppProvider, null,
-        React.createElement(App)
+      React.createElement(AuthProvider, null,
+        React.createElement(AppProvider, null,
+          React.createElement(App)
+        )
       )
     );
 
